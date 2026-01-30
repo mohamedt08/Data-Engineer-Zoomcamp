@@ -1,0 +1,24 @@
+id: 04_check_file_size
+namespace: zoomcamp
+
+variables:
+  file: "yellow_tripdata_2020-12.csv"
+
+tasks:
+  - id: extract_and_measure
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    commands:
+      - wget -qO- https://github.com/DataTalksClub/nyc-tlc-data/releases/download/yellow/{{ vars.file }}.gz | gunzip > {{ vars.file }}
+
+      - echo "-------------------------------------------------------"
+      - echo "📊 UNCOMPRESSED FILE SIZE FOR {{ vars.file }}:"
+      - du -h {{ vars.file }}
+      - echo "-------------------------------------------------------"
+
+    outputFiles:
+      - "{{ vars.file }}"
+
+  - id: purge_files
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles

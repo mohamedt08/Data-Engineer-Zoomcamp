@@ -1,0 +1,89 @@
+id: 04_postgres_taxi_2021_03_yellow
+namespace: zoomcamp
+description: >
+  Load all Yellow Taxi CSV files for 2020 from GitHub and insert into Postgres.
+
+variables:
+  taxi: yellow
+  year: "2021"
+  table: "public.yellow_tripdata_2021"
+  staging_table_prefix: "public.yellow_tripdata_staging_2021_"
+
+tasks:
+  - id: months_loop
+    type: io.kestra.plugin.core.flow.ForEach
+    values: ["03"]
+    concurrencyLimit: 1
+    tasks:
+      - id: set_vars
+        type: io.kestra.plugin.core.execution.SetVariables
+        variables:
+          month: "{{ taskrun.value }}"
+          file: "yellow_tripdata_2021-{{ taskrun.value }}.csv"
+          staging_table: "{{ vars.staging_table_prefix }}{{ taskrun.value }}"
+      
+      - id: extract
+        type: io.kestra.plugin.scripts.shell.Commands
+        outputFiles:
+          - "*.csv"
+        taskRunner:
+          type: io.kestra.plugin.core.runner.Process
+        commands:
+          # Download and unzip the file
+          - wget -qO- https://github.com/DataTalksClub/nyc-tlc-data/releases/download/yellow/{{ vars.file }}.gz | gunzip > {{ vars.file }}
+
+      - id: create_tables
+        type: io.kestra.plugin.jdbc.postgresql.Queries
+        sql: |
+          CREATE TABLE IF NOT EXISTS {{ vars.table }} (
+              unique_row_id text, filename text, VendorID text, tpep_pickup_datetime timestamp,
+              tpep_dropoff_datetime timestamp, passenger_count integer, trip_distance double precision,
+              RatecodeID text, store_and_fwd_flag text, PULocationID text, DOLocationID text,
+              payment_type integer, fare_amount double precision, extra double precision,
+              mta_tax double precision, tip_amount double precision, tolls_amount double precision,
+              improvement_surcharge double precision, total_amount double precision, congestion_surcharge double precision
+          );
+          CREATE TABLE IF NOT EXISTS {{ vars.staging_table }} (LIKE {{ vars.table }} INCLUDING ALL);
+          TRUNCATE TABLE {{ vars.staging_table }};
+
+      - id: copy_csv_to_staging
+        type: io.kestra.plugin.jdbc.postgresql.CopyIn
+        format: CSV
+        # Corrected: Accessing output via the specific loop iteration and grabbing the file URI
+        from: "{{ outputs.extract[taskrun.value].outputFiles[vars.file] }}"
+        table: "{{ vars.staging_table }}"
+        header: true
+        columns: [VendorID,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,RatecodeID,store_and_fwd_flag,PULocationID,DOLocationID,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge]
+
+      - id: add_unique_id_and_filename
+        type: io.kestra.plugin.jdbc.postgresql.Queries
+        sql: |
+          UPDATE {{ vars.staging_table }}
+          SET 
+            unique_row_id = md5(
+              COALESCE(CAST(VendorID AS text), '') ||
+              COALESCE(CAST(tpep_pickup_datetime AS text), '') || 
+              COALESCE(PULocationID, '') || 
+              COALESCE(CAST(fare_amount AS text), '')
+            ),
+            filename = '{{ vars.file }}';
+
+      - id: merge_to_main
+        type: io.kestra.plugin.jdbc.postgresql.Queries
+        sql: |
+          MERGE INTO {{ vars.table }} AS T
+          USING {{ vars.staging_table }} AS S
+          ON T.unique_row_id = S.unique_row_id
+          WHEN NOT MATCHED THEN
+            INSERT (unique_row_id, filename, VendorID, tpep_pickup_datetime, tpep_dropoff_datetime, passenger_count, trip_distance, RatecodeID, store_and_fwd_flag, PULocationID, DOLocationID, payment_type, fare_amount, extra, mta_tax, tip_amount, tolls_amount, improvement_surcharge, total_amount, congestion_surcharge)
+            VALUES (S.unique_row_id, S.filename, S.VendorID, S.tpep_pickup_datetime, S.tpep_dropoff_datetime, S.passenger_count, S.trip_distance, S.RatecodeID, S.store_and_fwd_flag, S.PULocationID, S.DOLocationID, S.payment_type, S.fare_amount, S.extra, S.mta_tax, S.tip_amount, S.tolls_amount, S.improvement_surcharge, S.total_amount, S.congestion_surcharge);
+
+  - id: purge_files
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
+
+pluginDefaults:
+  - type: io.kestra.plugin.jdbc.postgresql
+    values:
+      url: jdbc:postgresql://pgdatabase:5432/ny_taxi
+      username: root
+      password: root
